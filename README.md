@@ -30,3 +30,7 @@ Requires:
 - Playwright (for html-to-pdf)
 - Manim Community Edition (for manim-png)
 - Ghostscript + pdfinfo (for html-to-pdf)
+
+## License
+
+MIT
