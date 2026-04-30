@@ -13,7 +13,19 @@ import { randomUUID } from "crypto";
 
 // ── Playwright ──
 const PLAYWRIGHT_INDEX =
+  process.env.PLAYWRIGHT_INDEX_PATH ||
   "/home/yuki/fukutannin-config/seo/skills/seo/.venv/lib/python3.12/site-packages/playwright/driver/package/index.mjs";
+
+// ── Allowed output directory ──
+const ALLOWED_OUTPUT_DIR = process.env.OUTPUT_DIR || tmpdir();
+
+function validateOutputPath(p) {
+  const resolved = join(p); // resolve ".." etc
+  const allowed = join(ALLOWED_OUTPUT_DIR);
+  if (!resolved.startsWith(allowed)) {
+    throw new Error(`output_path must be under ${allowed}, got: ${p}`);
+  }
+}
 
 // ── Server ──
 const server = new Server(
@@ -42,7 +54,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           output_path: {
             type: "string",
             description:
-              "Optional output PDF path. Defaults to /tmp/<basename>.pdf",
+              "Optional output PDF path. Must be under /tmp/. Defaults to /tmp/worksheet-<timestamp>.pdf",
           },
           format: {
             type: "string",
@@ -75,7 +87,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           output_path: {
             type: "string",
             description:
-              "Optional output path. Defaults to /tmp/merged-<timestamp>.pdf",
+              "Optional output path. Must be under /tmp/. Defaults to /tmp/merged-<timestamp>.pdf",
           },
         },
         required: ["pdf_paths"],
@@ -104,13 +116,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case "html_to_pdf": {
+      // Validate html_path is provided and not null/undefined
+      if (args.html_path == null || args.html_path === "") {
+        return {
+          content: [{ type: "text", text: "Error: html_path is required and must not be empty" }],
+          isError: true,
+        };
+      }
       const paths = Array.isArray(args.html_path)
         ? args.html_path
         : [args.html_path];
       const output =
         args.output_path ||
-        join(tmpdir(), `worksheet-${Date.now()}.pdf`);
+        join(tmpdir(), `worksheet-${randomUUID()}.pdf`);
       const margin = args.margin || "8mm 12mm 8mm 12mm";
+
+      // Validate output path
+      try { validateOutputPath(output); } catch (e) {
+        return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
+      }
 
       // Validate all HTML files exist
       for (const p of paths) {
@@ -125,16 +149,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Convert each HTML to PDF via Playwright
       const pdfPaths = [];
       for (let i = 0; i < paths.length; i++) {
-        const tmpPdf = join(tmpdir(), `page-${i}-${Date.now()}.pdf`);
-        // Use unique script path per request to prevent race conditions
+        const tmpPdf = join(tmpdir(), `page-${randomUUID()}.pdf`);
         const scriptPath = join(tmpdir(), `_gen_pdf_${randomUUID()}.mjs`);
-        // Use JSON.stringify for safe path embedding (prevents code injection via paths)
         const genScript = `
 import { chromium } from ${JSON.stringify(PLAYWRIGHT_INDEX)};
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage();
 await page.goto(${JSON.stringify('file://' + paths[i])}, { waitUntil: 'networkidle', timeout: 30000 });
-// Wait for KaTeX/MathJax rendering
 await page.waitForTimeout(1200);
 await page.pdf({
   path: ${JSON.stringify(tmpPdf)},
@@ -151,11 +172,12 @@ console.log('OK:' + ${JSON.stringify(tmpPdf)});
             timeout: 60000,
             encoding: "utf8",
           });
-          // Clean up the temp script
           try { unlinkSync(scriptPath); } catch (_) {}
           if (result.includes("OK:")) {
             pdfPaths.push(tmpPdf);
           } else {
+            // Clean up temp PDF on failure
+            try { unlinkSync(tmpPdf); } catch (_) {}
             return {
               content: [{ type: "text", text: `PDF generation failed for ${paths[i]}: ${result}` }],
               isError: true,
@@ -163,6 +185,7 @@ console.log('OK:' + ${JSON.stringify(tmpPdf)});
           }
         } catch (e) {
           try { unlinkSync(scriptPath); } catch (_) {}
+          try { unlinkSync(tmpPdf); } catch (_) {}
           return {
             content: [{ type: "text", text: `PDF generation error for ${paths[i]}: ${e.stderr || e.message}` }],
             isError: true,
@@ -174,7 +197,6 @@ console.log('OK:' + ${JSON.stringify(tmpPdf)});
       let finalPdf;
       if (pdfPaths.length === 1) {
         finalPdf = pdfPaths[0];
-        // Rename to desired output
         if (finalPdf !== output) {
           execFileSync("cp", [finalPdf, output]);
           finalPdf = output;
@@ -186,7 +208,6 @@ console.log('OK:' + ${JSON.stringify(tmpPdf)});
           ...pdfPaths,
         ]);
         finalPdf = output;
-        // Cleanup temp PDFs
         for (const p of pdfPaths) {
           try { unlinkSync(p); } catch (_) {}
         }
@@ -221,7 +242,11 @@ console.log('OK:' + ${JSON.stringify(tmpPdf)});
       const paths = args.pdf_paths;
       const output =
         args.output_path ||
-        join(tmpdir(), `merged-${Date.now()}.pdf`);
+        join(tmpdir(), `merged-${randomUUID()}.pdf`);
+
+      try { validateOutputPath(output); } catch (e) {
+        return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
+      }
 
       for (const p of paths) {
         if (!existsSync(p)) {
@@ -242,12 +267,9 @@ console.log('OK:' + ${JSON.stringify(tmpPdf)});
         ]);
       }
 
-      // Page count
       let pages = "?";
       try {
-        const info = execFileSync("pdfinfo", [output], {
-          encoding: "utf8",
-        });
+        const info = execFileSync("pdfinfo", [output], { encoding: "utf8" });
         const m = info.match(/Pages:\s+(\d+)/);
         if (m) pages = m[1];
       } catch (_) {}
