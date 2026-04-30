@@ -10,7 +10,7 @@ import { existsSync, readdirSync, copyFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 
-const MANIM_BIN = process.env.MANIM_BIN || "/home/yuki/.local/bin/manim";
+const MANIM_BIN = process.env.MANIM_BIN_PATH || process.env.MANIM_BIN || "/home/yuki/.local/bin/manim";
 
 // ── Allowed output directory ──
 const ALLOWED_OUTPUT_DIR = process.env.OUTPUT_DIR || tmpdir();
