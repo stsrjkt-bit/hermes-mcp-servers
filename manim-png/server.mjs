@@ -6,11 +6,11 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { execFileSync } from "child_process";
-import { existsSync, readdirSync, copyFileSync, mkdirSync } from "fs";
+import { existsSync, readdirSync, copyFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 
-const MANIM_BIN = "/home/yuki/.local/bin/manim";
+const MANIM_BIN = process.env.MANIM_BIN_PATH || "/home/yuki/.local/bin/manim";
 
 // ── Helpers ──
 function findManimOutput(workdir, className, scriptBasename) {

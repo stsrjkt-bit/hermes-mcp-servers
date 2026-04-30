@@ -9,9 +9,11 @@ import { execFileSync } from "child_process";
 import { existsSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { randomUUID } from "crypto";
 
 // ── Playwright ──
 const PLAYWRIGHT_INDEX =
+  process.env.PLAYWRIGHT_INDEX_PATH ||
   "/home/yuki/fukutannin-config/seo/skills/seo/.venv/lib/python3.12/site-packages/playwright/driver/package/index.mjs";
 
 // ── Server ──
@@ -124,26 +126,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Convert each HTML to PDF via Playwright
       const pdfPaths = [];
       for (let i = 0; i < paths.length; i++) {
-        const tmpPdf = join(tmpdir(), `page-${i}-${Date.now()}.pdf`);
-        const genScript = `
-import { chromium } from '${PLAYWRIGHT_INDEX}';
-const browser = await chromium.launch({ headless: true });
-const page = await browser.newPage();
-await page.goto('file://${paths[i]}', { waitUntil: 'networkidle', timeout: 30000 });
-// Wait for KaTeX/MathJax rendering
-await page.waitForTimeout(1200);
-await page.pdf({
-  path: '${tmpPdf}',
-  format: '${args.format || "A4"}',
-  printBackground: true,
-  margin: { top: '${margin.split(" ")[0] || "8mm"}', right: '${margin.split(" ")[1] || "12mm"}', bottom: '${margin.split(" ")[2] || "8mm"}', left: '${margin.split(" ")[3] || "12mm"}' }
-});
-await browser.close();
-console.log('OK:' + '${tmpPdf}');
-`;
-        writeFileSync("/tmp/_gen_pdf.mjs", genScript);
+        const tmpPdf = join(tmpdir(), `page-${i}-${randomUUID()}.pdf`);
+        const genScriptPath = join(tmpdir(), `_gen_pdf-${randomUUID()}.mjs`);
+        const safePath = JSON.stringify(paths[i]);
+        const safeFormat = JSON.stringify(args.format || "A4");
+        const safeTop = JSON.stringify(margin.split(" ")[0] || "8mm");
+        const safeRight = JSON.stringify(margin.split(" ")[1] || "12mm");
+        const safeBottom = JSON.stringify(margin.split(" ")[2] || "8mm");
+        const safeLeft = JSON.stringify(margin.split(" ")[3] || "12mm");
+        const safeTmpPdf = JSON.stringify(tmpPdf);
+        const genScript = [
+          `import { chromium } from ${JSON.stringify(PLAYWRIGHT_INDEX)};`,
+          `const browser = await chromium.launch({ headless: true });`,
+          `const page = await browser.newPage();`,
+          `await page.goto(${safePath}, { waitUntil: 'networkidle', timeout: 30000 });`,
+          `await page.waitForTimeout(1200);`,
+          `await page.pdf({`,
+          `  path: ${safeTmpPdf},`,
+          `  format: ${safeFormat},`,
+          `  printBackground: true,`,
+          `  margin: { top: ${safeTop}, right: ${safeRight}, bottom: ${safeBottom}, left: ${safeLeft} }`,
+          `});`,
+          `await browser.close();`,
+          `console.log('OK:' + ${safeTmpPdf});`,
+        ].join("\n");
+        writeFileSync(genScriptPath, genScript);
         try {
-          const result = execFileSync("node", ["/tmp/_gen_pdf.mjs"], {
+          const result = execFileSync("node", [genScriptPath], {
             timeout: 60000,
             encoding: "utf8",
           });
@@ -160,6 +169,8 @@ console.log('OK:' + '${tmpPdf}');
             content: [{ type: "text", text: `PDF generation error for ${paths[i]}: ${e.stderr || e.message}` }],
             isError: true,
           };
+        } finally {
+          try { unlinkSync(genScriptPath); } catch (_) {}
         }
       }
 
