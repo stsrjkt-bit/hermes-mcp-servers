@@ -9,6 +9,7 @@ import { execFileSync } from "child_process";
 import { existsSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { randomUUID } from "crypto";
 
 // ── Playwright ──
 const PLAYWRIGHT_INDEX =
@@ -125,28 +126,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const pdfPaths = [];
       for (let i = 0; i < paths.length; i++) {
         const tmpPdf = join(tmpdir(), `page-${i}-${Date.now()}.pdf`);
+        // Use unique script path per request to prevent race conditions
+        const scriptPath = join(tmpdir(), `_gen_pdf_${randomUUID()}.mjs`);
+        // Use JSON.stringify for safe path embedding (prevents code injection via paths)
         const genScript = `
-import { chromium } from '${PLAYWRIGHT_INDEX}';
+import { chromium } from ${JSON.stringify(PLAYWRIGHT_INDEX)};
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage();
-await page.goto('file://${paths[i]}', { waitUntil: 'networkidle', timeout: 30000 });
+await page.goto(${JSON.stringify('file://' + paths[i])}, { waitUntil: 'networkidle', timeout: 30000 });
 // Wait for KaTeX/MathJax rendering
 await page.waitForTimeout(1200);
 await page.pdf({
-  path: '${tmpPdf}',
-  format: '${args.format || "A4"}',
+  path: ${JSON.stringify(tmpPdf)},
+  format: ${JSON.stringify(args.format || "A4")},
   printBackground: true,
-  margin: { top: '${margin.split(" ")[0] || "8mm"}', right: '${margin.split(" ")[1] || "12mm"}', bottom: '${margin.split(" ")[2] || "8mm"}', left: '${margin.split(" ")[3] || "12mm"}' }
+  margin: { top: ${JSON.stringify(margin.split(" ")[0] || "8mm")}, right: ${JSON.stringify(margin.split(" ")[1] || "12mm")}, bottom: ${JSON.stringify(margin.split(" ")[2] || "8mm")}, left: ${JSON.stringify(margin.split(" ")[3] || "12mm")} }
 });
 await browser.close();
-console.log('OK:' + '${tmpPdf}');
+console.log('OK:' + ${JSON.stringify(tmpPdf)});
 `;
-        writeFileSync("/tmp/_gen_pdf.mjs", genScript);
+        writeFileSync(scriptPath, genScript);
         try {
-          const result = execFileSync("node", ["/tmp/_gen_pdf.mjs"], {
+          const result = execFileSync("node", [scriptPath], {
             timeout: 60000,
             encoding: "utf8",
           });
+          // Clean up the temp script
+          try { unlinkSync(scriptPath); } catch (_) {}
           if (result.includes("OK:")) {
             pdfPaths.push(tmpPdf);
           } else {
@@ -156,6 +162,7 @@ console.log('OK:' + '${tmpPdf}');
             };
           }
         } catch (e) {
+          try { unlinkSync(scriptPath); } catch (_) {}
           return {
             content: [{ type: "text", text: `PDF generation error for ${paths[i]}: ${e.stderr || e.message}` }],
             isError: true,
