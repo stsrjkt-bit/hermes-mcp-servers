@@ -6,20 +6,31 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { execFileSync } from "child_process";
-import { existsSync, readdirSync, copyFileSync, mkdirSync } from "fs";
+import { existsSync, readdirSync, copyFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 
-const MANIM_BIN = "/home/yuki/.local/bin/manim";
+const MANIM_BIN = process.env.MANIM_BIN || "/home/yuki/.local/bin/manim";
+
+// ── Allowed output directory ──
+const ALLOWED_OUTPUT_DIR = process.env.OUTPUT_DIR || tmpdir();
+
+function validateOutputPath(p) {
+  const resolved = join(p);
+  const allowed = join(ALLOWED_OUTPUT_DIR);
+  if (!resolved.startsWith(allowed)) {
+    throw new Error(`output_path must be under ${allowed}, got: ${p}`);
+  }
+}
 
 // ── Helpers ──
 function findManimOutput(workdir, className, scriptBasename) {
   const mediaDir = join(workdir, "media", "images", scriptBasename.replace(/\.py$/, ""));
   if (!existsSync(mediaDir)) return null;
 
-  // Look for ClassName_ManimCE_v*.png
   const files = readdirSync(mediaDir);
-  const pattern = new RegExp(`^${className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_ManimCE_v\\d+\\.\\d+\\.\\d+\\.png$`);
+  const escapedName = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^${escapedName}_ManimCE_v\\d+\\.\\d+\\.\\d+\\.png$`);
   for (const f of files) {
     if (pattern.test(f)) {
       return join(mediaDir, f);
@@ -45,7 +56,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           script_path: {
             type: "string",
-            description: "Absolute path to the Manim Python script (.py).",
+            description: "Absolute path to the Manim Python script (.py). Must be under /tmp/ or the current workspace.",
           },
           class_name: {
             type: "string",
@@ -61,7 +72,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           output_path: {
             type: "string",
             description:
-              "Optional. Copy the output PNG to this path. Defaults to /tmp/<class_name>.png",
+              "Optional. Copy the output PNG to this path. Must be under /tmp/. Defaults to /tmp/<class_name>.png",
           },
         },
         required: ["script_path", "class_name"],
@@ -74,6 +85,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   if (name === "manim_render") {
+    // Validate required args
+    if (args.class_name == null || args.class_name === "") {
+      return {
+        content: [{ type: "text", text: "Error: class_name is required and must not be empty" }],
+        isError: true,
+      };
+    }
+
     const scriptPath = resolve(args.script_path);
     if (!existsSync(scriptPath)) {
       return {
@@ -89,27 +108,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const scriptDir = dirname(scriptPath);
     const scriptBasename = basename(scriptPath);
 
+    // Validate output path
+    const output = args.output_path || join(tmpdir(), `${className}.png`);
+    try { validateOutputPath(output); } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
+    }
+
     try {
-      // Run manim
       const result = execFileSync(
         MANIM_BIN,
         [`-pq${quality}`, scriptBasename, className],
         {
           cwd: scriptDir,
-          timeout: 120000, // 2 min timeout
+          timeout: 120000,
           encoding: "utf8",
           stdio: ["pipe", "pipe", "pipe"],
         }
       );
 
-      // Find the output PNG
       const pngPath = findManimOutput(scriptDir, className, scriptBasename);
       if (!pngPath) {
-        // Try to parse from manim output
         const match = result.match(/File ready at\s+(.+\.png)/);
         if (match) {
           const found = match[1].trim();
-          const output = args.output_path || join(tmpdir(), `${className}.png`);
           copyFileSync(found, output);
           return {
             content: [
@@ -131,9 +152,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // Copy to predictable output path
-      const output =
-        args.output_path || join(tmpdir(), `${className}.png`);
       copyFileSync(pngPath, output);
 
       return {
@@ -146,12 +164,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     } catch (e) {
       const stderr = e.stderr || "";
-      const stdout = e.stdout || "";
       return {
         content: [
           {
             type: "text",
-            text: `Manim render failed for ${className}:\nSTDERR: ${stderr.slice(-1000)}\nSTDOUT: ${stdout.slice(-500)}`,
+            text: `Manim render failed for ${className}:\nSTDERR: ${stderr.slice(-2000)}`,
           },
         ],
         isError: true,
